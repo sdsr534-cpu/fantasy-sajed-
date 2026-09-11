@@ -1,40 +1,65 @@
+// Sajed Fantasy — same-origin FPL API proxy (Cloudflare Pages Functions)
+// Runs automatically at yourproject.pages.dev/api/* — no separate Worker,
+// no workers.dev domain, no CORS (same origin as the site itself).
+
 const FPL_BASE = "https://fantasy.premierleague.com/api/";
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Accept",
-  "Access-Control-Max-Age": "86400",
-};
-
-const BOOTSTRAP_TTL = 60;
-const DEFAULT_TTL = 15;
-
 export async function onRequest(context) {
-  const { request, params, waitUntil } = context;
-  const method = request.method.toUpperCase();
+  const { request, params } = context;
+  const url = new URL(request.url);
 
-  if (method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: CORS_HEADERS,
-    });
-  }
-
-  if (method !== "GET" && method !== "HEAD") {
-    return json({ error: "Method not allowed" }, 405);
-  }
-
-  const parts = Array.isArray(params.path)
-    ? params.path
-    : (params.path ? [params.path] : []);
-
-  const path = parts.join("/").replace(/^\/+|\/+$/g, "");
-
+  const pathParts = Array.isArray(params.path) ? params.path : (params.path ? [params.path] : []);
+  const path = pathParts.join("/");
   if (!path) {
-    return json({
-      ok: true,
-      service: "SAJED Fantasy FPL API"
+    return json({ error: "Missing API path" }, 400);
+  }
+
+  const target = FPL_BASE + path + (path.endsWith("/") ? "" : "/") + url.search;
+
+  const cache = caches.default;
+  const cacheKey = new Request(target, { method: "GET" });
+  const isStatic = path.startsWith("bootstrap-static") || path.startsWith("fixtures");
+
+  try {
+    const cached = await cache.match(cacheKey);
+    if (cached) return cached;
+
+    const upstream = await fetch(target, {
+      method: "GET",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+      },
+    });
+
+    if (!upstream.ok) {
+      return json({ error: "Upstream error " + upstream.status }, upstream.status);
+    }
+
+    const body = await upstream.text();
+    const res = new Response(body, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "public, max-age=" + (isStatic ? 60 : 15),
+      },
+    });
+
+    context.waitUntil(cache.put(cacheKey, res.clone()));
+    return res;
+  } catch (err) {
+    return json({ error: "Proxy failure: " + err.message }, 502);
+  }
+}
+
+function json(obj, status) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}      service: "SAJED Fantasy FPL API"
     });
   }
 
